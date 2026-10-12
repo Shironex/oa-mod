@@ -1,0 +1,14 @@
+{
+  "label": "6.0.0-be.788",
+  "origin": "https://builds.bepinex.dev/projects/bepinex_be/788/BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.788%2B5b766a3.zip",
+  "url": "https://github.com/Shironex/oa-mod/releases/download/bepinex-6.0.0-be.788/BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.788.zip",
+  "size": 34336405,
+  "sha256": "f4cc496bd098a0df4164b81e3737297707f13a47c2478dba2f60eefab784817a",
+  "probe_sha256": "46cf1ef802bdf8cb6587fc1e4d98f7af1073a60487b39a64e230e6f6e4c23aec",
+  "root_files": {
+    "winhttp.dll": "8c6cdbc38836dee87e3368f5de1994d7c0ccebf29e4ce7aba3c0981f9375412c",
+    "doorstop_config.ini": "7daebb02054747faee66c875a778e0e8d54dad24dd460e1fb69aa31378d9ea8f",
+    ".doorstop_version": "75a2f501000d4fe28f74bc7ee66dae5581959d28b6c44f0c1b0c05cd5ba261e6",
+    "changelog.txt": "7020270524c1788cd3e7af2cba8a4f2e4bcc9f7fcb522679a1221fe2bb34bc4f"
+  }
+}
