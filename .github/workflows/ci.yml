@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      # Forks and Dependabot have no access to the private references, so they skip the build.
+      HAS_REFS: ${{ secrets.REFS_DEPLOY_KEY != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: No build references here
+        if: env.HAS_REFS != 'true'
+        run: echo "::notice::REFS_DEPLOY_KEY is not available, so the mod is not built in this run."
+
+      # The interop assemblies BepInEx generates from the game. They are derived from
+      # the game, so they live in a private repo. REFS_SHA pins the commit to build against.
+      - name: Checkout build references
+        if: env.HAS_REFS == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Shironex/oa-mod-refs
+          ref: ${{ vars.REFS_SHA }}
+          ssh-key: ${{ secrets.REFS_DEPLOY_KEY }}
+          path: refs
+
+      - name: Restore
+        if: env.HAS_REFS == 'true'
+        run: dotnet restore OaMod.csproj --locked-mode
+
+      - name: Build
+        if: env.HAS_REFS == 'true'
+        run: dotnet build OaMod.csproj -c Release --no-restore -p:NoDeploy=true -p:InteropDir="${{ github.workspace }}\refs\interop" -p:ContinuousIntegrationBuild=true
+
+      - name: Upload OaMod.dll
+        if: env.HAS_REFS == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: OaMod
+          path: bin/Release/net6.0/OaMod.dll
+          if-no-files-found: error
