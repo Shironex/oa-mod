@@ -173,8 +173,10 @@ jobs:
         run: corepack enable
 
       # No install scripts: no code of a dependency runs before the signer.
+      # Run inside launcher/, so corepack reads the pnpm version that package.json pins.
       - name: Install
-        run: pnpm --dir launcher install --frozen-lockfile --ignore-scripts
+        working-directory: launcher
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Download the release list
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
