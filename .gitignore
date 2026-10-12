@@ -1,0 +1,10 @@
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.idea/
+.claude/
+
+# Working notes, not for the public repo
+docs/launcher-plan.md

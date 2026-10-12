@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    OA Mod: BepInEx 6 (IL2CPP) plugin for Golf With Your Friends, for our tournaments.
+    net6.0 because BepInEx ships the .NET 6 runtime. Launch the game once with
+    BepInEx installed before the first build so the interop assemblies exist.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>OaMod</AssemblyName>
+    <RootNamespace>OaMod</RootNamespace>
+    <Product>OA Mod</Product>
+    <Version>0.1.0</Version>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <DebugType>portable</DebugType>
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- CI restores with locked-mode, so a package cannot change under a release. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <!-- NU1603: BepInEx's transitive Cpp2IL pin resolves to a slightly different pre-release; compile-only. -->
+    <NoWarn>$(NoWarn);NU1603</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- Override with: dotnet build -p:GameDir="D:\SteamLibrary\steamapps\common\Golf With Your Friends" -->
+    <GameDir Condition="'$(GameDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\Golf With Your Friends</GameDir>
+    <BepInExDir>$(GameDir)\BepInEx</BepInExDir>
+    <InteropDir>$(BepInExDir)\interop</InteropDir>
+    <DeployDir>$(BepInExDir)\plugins\OaMod</DeployDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Keep the version in step with the BepInEx build installed in the game folder. -->
+    <PackageReference Include="BepInEx.Unity.IL2CPP" Version="6.0.0-be.788" IncludeAssets="compile" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Generated interop assemblies. Private=false: never copy these into bin/ or plugins/. -->
+    <Reference Include="$(InteropDir)\*.dll" Private="false" />
+  </ItemGroup>
+
+  <Target Name="CheckInterop" BeforeTargets="CoreCompile">
+    <Error Condition="!Exists('$(InteropDir)\Assembly-CSharp.dll')"
+           Text="Interop assemblies not found at $(InteropDir). Install BepInEx 6 IL2CPP into the game folder and launch the game once, or pass -p:GameDir=..." />
+  </Target>
+
+  <!-- Pass -p:NoDeploy=true to build without touching the game folder (Windows locks the DLL while the game runs). -->
+  <Target Name="Deploy" AfterTargets="Build" Condition="'$(NoDeploy)' != 'true' and Exists('$(BepInExDir)\plugins')">
+    <MakeDir Directories="$(DeployDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(DeployDir)" SkipUnchangedFiles="true" Retries="0" ContinueOnError="WarnAndContinue">
+      <Output TaskParameter="CopiedFiles" ItemName="_OaModDeployed" />
+    </Copy>
+    <Message Importance="high" Condition="'@(_OaModDeployed)' != ''" Text="Deployed $(TargetFileName) -> $(DeployDir)" />
+    <Warning Condition="'@(_OaModDeployed)' == ''"
+             Text="NOT DEPLOYED: $(DeployDir)\$(TargetFileName) is locked (is the game running?). Quit the game and rebuild." />
+  </Target>
+
+</Project>
