@@ -1,0 +1,336 @@
+# Releases the mod: build, sign the release list, verify, publish.
+#
+# A pushed tag `v<major>.<minor>.<patch>` starts a release. Three jobs, each
+# with only what it needs:
+#
+#   build    the read-only key of the private build references, nothing else.
+#            Builds OaMod.dll and writes manifest.json, unsigned.
+#   sign     the only job with the manifest key. It waits for my approval of
+#            the `release` environment, then signs manifest.json.
+#   publish  no signing secrets, write access to releases. It verifies the
+#            signature and the mod file the way a launcher does, creates a
+#            draft, compares what GitHub stored, and publishes as the last step.
+#
+# Every installed launcher reads `releases/latest/download/manifest.json` of
+# this repository, so a published release reaches all of them at once.
+#
+# A manual run (workflow_dispatch) from a branch is a rehearsal: only `build`
+# runs. A manual run from a tag is a release, the way to try again after a failure.
+#
+# The scripts that write, sign and verify the manifest live in the launcher
+# repository, checked out at the commit pinned in LAUNCHER_SHA.
+
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  LAUNCHER_REPO: Shironex/oa-mod-launcher
+  LAUNCHER_SHA: 1a8c50b6392abccf6cb488768a8538cb61869c99
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+
+jobs:
+  build:
+    name: Build the mod
+    runs-on: windows-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Checkout build references
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Shironex/oa-mod-refs
+          ref: ${{ vars.REFS_SHA }}
+          ssh-key: ${{ secrets.REFS_DEPLOY_KEY }}
+          path: refs
+          persist-credentials: false
+
+      - name: Checkout the launcher scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.LAUNCHER_REPO }}
+          ref: ${{ env.LAUNCHER_SHA }}
+          path: launcher
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      # The version has one source, <Version> in OaMod.csproj. The plugin
+      # reports the same number in the game, so the two are compared here.
+      - name: Read the version and compare it with the tag
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(sed -n 's/.*<Version>\(.*\)<\/Version>.*/\1/p' OaMod.csproj | head -n 1)"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Could not read the version from OaMod.csproj"
+            exit 1
+          fi
+          if ! grep -q "PluginVersion = \"$version\"" src/Plugin.cs; then
+            echo "::error::src/Plugin.cs does not say version $version"
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match version $version in OaMod.csproj"
+              exit 1
+            fi
+            if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --silent 2> /dev/null; then
+              echo "::error::Release $GITHUB_REF_NAME is already published. Raise the version."
+              exit 1
+            fi
+          else
+            echo "::notice::Rehearsal of version $version from $GITHUB_REF_NAME: nothing will be signed or published"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore
+        run: dotnet restore OaMod.csproj --locked-mode
+
+      - name: Build
+        run: |
+          dotnet build OaMod.csproj -c Release --no-restore -p:NoDeploy=true \
+            -p:InteropDir="$(cygpath -w "$GITHUB_WORKSPACE/refs/interop")" \
+            -p:ContinuousIntegrationBuild=true
+
+      # Fails when CHANGELOG.md has no section for this version: its first
+      # line is what the launcher shows as the notes of the release.
+      - name: Write the release list, unsigned
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir out
+          cp bin/Release/net6.0/OaMod.dll "out/OaMod-$VERSION.dll"
+          node launcher/scripts/build-manifest.mjs \
+            --mod "out/OaMod-$VERSION.dll" \
+            --version "$VERSION" \
+            --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION/" \
+            --bepinex bepinex.json \
+            --game-builds "$(tr -d '\r\n' < refs/buildid.txt)" \
+            --changelog CHANGELOG.md \
+            --out out \
+            --no-sign
+          cat out/manifest.json
+          (cd out && sha256sum ./*.dll) | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the mod and the release list
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
+
+  sign:
+    name: Sign the release list
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    environment: release
+    steps:
+      - name: Checkout the launcher scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.LAUNCHER_REPO }}
+          ref: ${{ env.LAUNCHER_SHA }}
+          path: launcher
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Set up pnpm
+        working-directory: launcher
+        run: corepack enable
+
+      # No install scripts: no code of a dependency runs before the signer.
+      - name: Install
+        run: pnpm --dir launcher install --frozen-lockfile --ignore-scripts
+
+      - name: Download the release list
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: out
+
+      # The only step that sees the secrets. Nothing here prints the key.
+      - name: Sign
+        env:
+          MANIFEST_PRIVATE_KEY: ${{ secrets.MANIFEST_PRIVATE_KEY }}
+          MANIFEST_PRIVATE_KEY_PASSWORD: ${{ secrets.MANIFEST_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$MANIFEST_PRIVATE_KEY" ]; then
+            echo "::error::The release environment holds no MANIFEST_PRIVATE_KEY"
+            exit 1
+          fi
+          printf '%s' "$MANIFEST_PRIVATE_KEY" | tr -d '\r\n' > "$RUNNER_TEMP/manifest.key"
+          node launcher/scripts/sign-file.mjs --file out/manifest.json \
+            --key "$RUNNER_TEMP/manifest.key" --password-env MANIFEST_PRIVATE_KEY_PASSWORD
+          rm -f "$RUNNER_TEMP/manifest.key"
+          test -s out/manifest.json.sig
+
+      - name: Upload the signature
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signature
+          path: out/manifest.json.sig
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Verify and publish
+    needs: [build, sign]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      TAG: v${{ needs.build.outputs.version }}
+    steps:
+      - name: Checkout the launcher
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.LAUNCHER_REPO }}
+          ref: ${{ env.LAUNCHER_SHA }}
+          path: launcher
+          persist-credentials: false
+
+      - name: Download the mod and the release list
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: publish
+
+      - name: Download the signature
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signature
+          path: publish
+
+      # The check an installed launcher makes, made here first: the signature
+      # is by the release key over these exact bytes, and the mod file has the
+      # size and hash the list names.
+      - name: Verify the release list and the mod file
+        working-directory: launcher
+        run: |
+          rustup toolchain install --no-self-update
+          cargo run --locked -p oa-mod-launcher-core --example verify_manifest -- \
+            ../publish/manifest.json --mod "../publish/OaMod-$VERSION.dll"
+
+      # The BepInEx archive the list points at must be there, with the hash it names.
+      - name: Check the BepInEx mirror
+        run: |
+          url="$(jq -r .bepinex.url publish/manifest.json)"
+          want="$(jq -r .bepinex.sha256 publish/manifest.json)"
+          got="$(curl -fsSL "$url" | sha256sum | cut -d' ' -f1)"
+          if [ "$got" != "$want" ]; then
+            echo "::error::$url has sha256 $got, the list says $want"
+            exit 1
+          fi
+
+      - name: Refuse a published release, remove a stale draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          found="$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"$TAG\") | \"\(.id) \(.draft)\"")"
+          while read -r id draft; do
+            [ -n "$id" ] || continue
+            if [ "$draft" != true ]; then
+              echo "::error::Release $TAG is already published. Raise the version."
+              exit 1
+            fi
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+          done <<< "$found"
+
+      # A draft first: a draft is never "latest", so no launcher sees it
+      # while its files are still being uploaded and checked.
+      - name: Create the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          jq -r .notes publish/manifest.json > notes.md
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "OA Mod $VERSION" \
+            --notes-file notes.md \
+            --draft \
+            --verify-tag \
+            "publish/OaMod-$VERSION.dll" publish/manifest.json publish/manifest.json.sig
+
+      - name: Compare the draft with the local files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=""
+          for attempt in 1 2 3 4 5 6; do
+            id="$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+              --jq ".[] | select(.tag_name == \"$TAG\" and .draft) | .id")"
+            if [ -n "$id" ]; then break; fi
+            sleep 5
+          done
+          if [ "$(wc -w <<< "$id")" -ne 1 ]; then
+            echo "::error::Expected one draft of $TAG, found: $id"
+            exit 1
+          fi
+          stored="$(gh api "repos/$GITHUB_REPOSITORY/releases/$id" \
+            --jq '.assets[] | select(.state == "uploaded") | "\(.name) \(.size)"' | sort)"
+          expected="$(cd publish && stat -c '%n %s' -- * | sort)"
+          echo "$stored"
+          if [ "$stored" != "$expected" ]; then
+            echo "::error::The draft does not hold what was built. Expected:"
+            echo "$expected"
+            exit 1
+          fi
+
+      # The last step that changes anything. From here every installed
+      # launcher is offered this version.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+
+      # If this fails the release IS published: look at it at once.
+      - name: Check the address the launchers read
+        run: |
+          url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/manifest.json"
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fsSL "$url" -o served.json && cmp -s served.json publish/manifest.json; then
+              echo "$url serves the release list of $VERSION"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::$url does not serve the release list of $VERSION. The release is published: check it now."
+          exit 1
